@@ -31,9 +31,10 @@ import random
 import subprocess
 import math
 import re
+import time
 
 # Adapt paths to your setup if needed:
-tracergrind_exec='/usr/local/bin/valgrind'
+tracergrind_exec='/usr/bin/valgrind'
 tracerpin_exec='/usr/local/bin/Tracer'
 
 def processinput(iblock, blocksize):
@@ -297,6 +298,7 @@ class Tracer(object):
     def run(self, n, verbose=True):
         self.verbose=verbose
         for i in range(n):
+            # This can be in parallel ?
             iblock=random.randint(0, (1<<(8*self.blocksize))-1)
             oblock=self.get_trace(i, iblock)
 
@@ -338,6 +340,7 @@ class Tracer(object):
             with open('trace_%s_%04i_%s_%s.bin'
                   % (f.keyword, n, iblockstr, oblockstr), 'wb') as trace:
                 trace.write(''.join([struct.pack(f.extract_fmt, x) for x in self._trace_data[f.keyword]]))
+            # f.record_info  =True
             if f.record_info:
                 with open('trace_%s_%s_%s.info'
                       % (f.keyword, iblockstr, oblockstr), 'wb') as trace:
@@ -375,6 +378,8 @@ class TracerPIN(Tracer):
             if self.arch==ARCH.i386:
                 self.stack_range =(0xff000000, 0xffffffff)
             elif self.arch==ARCH.amd64:
+                # self.stack_range =(0x0fffffffffff, 0x1fffffffffff)
+
                 self.stack_range =(0x7fff00000000, 0x7fffffffffff)
         if record_info:
             for f in self.filters:
@@ -387,11 +392,22 @@ class TracerPIN(Tracer):
         if input_args is None:
             input_args=[]
         cmd_list=[tracerpin_exec, '-q', '1', '-b', '0', '-c', '0', '-i', '0', '-f', str(self.addr_range), '-o', self.tmptracefile, '--'] + self.target + input_args
+        print " ".join(cmd_list)
+        t1 = time.time()
         output=self._exec(cmd_list, input_stdin)
+        print time.time() - t1
         oblock=self.processoutput(output, self.blocksize)
+        opened = False
+        closed = False
+        opencount = 0
+        closecount = 0
         self._trace_init(n, iblock, oblock)
+        # exit(1)
         with open(self.tmptracefile, 'r') as trace:
+            I = 0
+            S = 0
             for line in iter(trace.readline, ''):
+                S += 1
                 if len(line) > 2 and (line[1]=='R' or line[1]=='W'):
                     m=re.search(r'\[(.)\] *([0-9]+)(0x[0-9a-fA-F]+) *(0x[0-9a-fA-F]+) *size= *([0-9]+) *value= *(.*)', line)
                     assert m is not None
@@ -401,14 +417,21 @@ class TracerPIN(Tracer):
                     mem_addr=int(m.group(4), 16)
                     mem_size=int(m.group(5), 16)
                     mem_data=int(m.group(6).replace(" ",""), 16)
+
+                    
+                    #if opened and not closed:
+                    #print(opencount, closecount, I)
+                    I += 1
                     for f in self.filters:
                         if mem_mode in f.modes and f.condition(self.stack_range, mem_addr, mem_size, mem_data):
                             if f.record_info:
                                 self._trace_info[f.keyword].append((mem_mode, item, ins_addr, mem_addr, mem_size, mem_data))
                             self._trace_data[f.keyword].append(f.extract(mem_addr, mem_size, mem_data))
+            # print(S, I)
+            #exit(1)
         self._trace_dump()
-        if not self.debug:
-            os.remove(self.tmptracefile)
+        #if not self.debug:
+        #    os.remove(self.tmptracefile)
         return oblock
 
     def run_once(self, iblock=None, tracefile=None):
@@ -460,21 +483,31 @@ class TracerGrind(Tracer):
         if input_args is None:
             input_args=[]
         cmd_list=[tracergrind_exec, '--quiet', '--trace-children=yes', '--tool=tracergrind', '--filter='+str(self.addr_range), '--vex-iropt-register-updates=allregs-at-mem-access', '--output='+self.tmptracefile+'.grind'] + self.target + input_args
+        #print " ".join(cmd_list)
         output=self._exec(cmd_list, input_stdin)
         oblock=self.processoutput(output, self.blocksize)
+        opened = False
+        closed = False
+        opencount = 0
+        closecount = 0
         output=subprocess.check_output("texttrace %s >(grep '^.M' > %s)" % (self.tmptracefile+'.grind', self.tmptracefile), shell=True, executable='/bin/bash')
         if not self.debug:
             os.remove(self.tmptracefile+'.grind')
         self._trace_init(n, iblock, oblock)
+        C = 0
+        print(self.tmptracefile)
         with open(self.tmptracefile, 'r') as trace:
             for line in iter(trace.readline, ''):
                 mem_mode=line[line.index('MODE')+6]
                 mem_addr=int(line[line.index('START_ADDRESS')+15:line.index('START_ADDRESS')+31], 16)
                 mem_size=int(line[line.index('LENGTH')+7:line.index('LENGTH')+10])
                 mem_data=int(line[line.index('DATA')+6:].replace(" ",""), 16)
+
+                C += 1
                 for f in self.filters:
                     if mem_mode in f.modes and f.condition(self.stack_range, mem_addr, mem_size, mem_data):
                         self._trace_data[f.keyword].append(f.extract(mem_addr, mem_size, mem_data))
+            print(C)
         self._trace_dump()
         if not self.debug:
             os.remove(self.tmptracefile)
